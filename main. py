@@ -1,1 +1,274 @@
+import os
+import json
+import time
+import uuid
+import urllib.request
+import urllib.parse
 
+# ==========================================
+# WALLEX AUTO TRADER
+# ==========================================
+
+BASE_URL = "https://api.wallex.ir"
+
+# ------------------------------------------
+# تنظیمات اصلی
+# ------------------------------------------
+
+# تا قبل از تست کامل، False بماند
+LIVE_TRADING = False
+
+# حداکثر ارزش هر معامله بر حسب ارز مظنه
+MAX_TRADE_VALUE = 5.0
+
+# نمادهایی که ربات بررسی می‌کند
+SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "DOGEUSDT"
+]
+
+# ------------------------------------------
+# API KEY
+# ------------------------------------------
+# کلید را اینجا ننویس.
+# بعداً در GitHub Secrets با نام WALLEX_API_KEY قرار می‌دهیم.
+
+API_KEY = os.environ.get("WALLEX_API_KEY", "")
+
+
+# ==========================================
+# درخواست به والکس
+# ==========================================
+
+def wallex_request(method, endpoint, data=None, private=False):
+
+    url = BASE_URL + endpoint
+
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    if private:
+        if not API_KEY:
+            raise Exception("WALLEX_API_KEY تنظیم نشده است.")
+
+        headers["X-API-Key"] = API_KEY
+
+    body = None
+
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=headers,
+        method=method
+    )
+
+    with urllib.request.urlopen(request, timeout=15) as response:
+        raw = response.read().decode("utf-8")
+
+    return json.loads(raw)
+
+
+# ==========================================
+# اطلاعات بازار
+# ==========================================
+
+def get_markets():
+
+    response = wallex_request(
+        "GET",
+        "/v1/markets"
+    )
+
+    if not response.get("success"):
+        raise Exception("دریافت بازارها ناموفق بود.")
+
+    return response["result"]["symbols"]
+
+
+# ==========================================
+# قیمت فعلی از Order Book
+# ==========================================
+
+def get_price(symbol):
+
+    response = wallex_request(
+        "GET",
+        "/v1/depth?symbol=" + urllib.parse.quote(symbol)
+    )
+
+    if not response.get("success"):
+        raise Exception("دریافت قیمت ناموفق بود.")
+
+    result = response["result"]
+
+    bids = result.get("bid", [])
+    asks = result.get("ask", [])
+
+    if not bids or not asks:
+        raise Exception("Order Book خالی است.")
+
+    best_bid = float(bids[0]["price"])
+    best_ask = float(asks[0]["price"])
+
+    return best_bid, best_ask
+
+
+# ==========================================
+# ثبت سفارش
+# ==========================================
+
+def create_order(symbol, side, quantity, price):
+
+    order = {
+        "client_id": "BOT-" + str(uuid.uuid4()),
+        "symbol": symbol,
+        "type": "LIMIT",
+        "side": side,
+        "price": str(price),
+        "quantity": str(quantity)
+    }
+
+    # قفل ایمنی
+    if not LIVE_TRADING:
+        print("\n[TEST MODE]")
+        print("ORDER WOULD BE:")
+        print(json.dumps(order, indent=2))
+        return None
+
+    # معامله واقعی
+    response = wallex_request(
+        "POST",
+        "/v1/account/orders",
+        order,
+        private=True
+    )
+
+    return response
+
+
+# ==========================================
+# محاسبه حجم
+# ==========================================
+
+def calculate_quantity(price, max_value):
+
+    if price <= 0:
+        return 0
+
+    quantity = max_value / price
+
+    return quantity
+
+
+# ==========================================
+# استراتژی ساده
+# ==========================================
+
+def get_signal(symbol):
+
+    bid, ask = get_price(symbol)
+
+    spread = ((ask - bid) / bid) * 100
+
+    print(
+        f"{symbol} | "
+        f"BID={bid} | "
+        f"ASK={ask} | "
+        f"Spread={spread:.3f}%"
+    )
+
+    # فعلاً هیچ معامله‌ای صرفاً بر اساس قیمت انجام نمی‌دهیم.
+    # استراتژی اصلی را بعد از اتصال کامل اضافه می‌کنیم.
+
+    return "HOLD", bid, ask
+
+
+# ==========================================
+# اجرای ربات
+# ==========================================
+
+def main():
+
+    print("=" * 50)
+    print("WALLEX AUTO TRADER")
+    print("=" * 50)
+
+    if LIVE_TRADING:
+        print("⚠️ LIVE TRADING = ON")
+        print("معاملات واقعی فعال هستند.")
+    else:
+        print("TEST MODE = ON")
+        print("هیچ معامله واقعی انجام نمی‌شود.")
+
+    print("=" * 50)
+
+    markets = get_markets()
+
+    for symbol in SYMBOLS:
+
+        try:
+
+            if symbol not in markets:
+                print(f"{symbol}: در بازارهای والکس پیدا نشد.")
+                continue
+
+            signal, bid, ask = get_signal(symbol)
+
+            print(f"Signal: {signal}")
+
+            # --------------------------------------
+            # فعلاً فقط HOLD
+            # --------------------------------------
+
+            if signal == "BUY":
+
+                quantity = calculate_quantity(
+                    ask,
+                    MAX_TRADE_VALUE
+                )
+
+                result = create_order(
+                    symbol,
+                    "BUY",
+                    quantity,
+                    ask
+                )
+
+                print("BUY RESULT:")
+                print(result)
+
+            elif signal == "SELL":
+
+                quantity = calculate_quantity(
+                    bid,
+                    MAX_TRADE_VALUE
+                )
+
+                result = create_order(
+                    symbol,
+                    "SELL",
+                    quantity,
+                    bid
+                )
+
+                print("SELL RESULT:")
+                print(result)
+
+            time.sleep(1)
+
+        except Exception as error:
+
+            print(
+                f"ERROR {symbol}: {error}"
+            )
+
+
+if __name__ == "__main__":
+    main()
